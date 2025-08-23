@@ -1,0 +1,7 @@
+{
+  "__comment": "Add new devices by mapping primary service UUID (lowercase, 16-bit like 'fff0' or full 128-bit) to a free-form device type string.",
+  "fff0": "stimulator-basic",
+  "180d": "sensor-hr",
+  "0000ffe0-0000-1000-8000-00805f9b34fb": "sensor-simple",
+  "a0a4c680-96be-4222-b41e-98ea76b0120c": "tns"
+}
