@@ -38,6 +38,7 @@ export interface BleManagerLike {
     serviceUUID: string,
     characteristicUUID: string
   ): Promise<{ value: string | null }>;
+  readRSSIForDevice?: (id: string) => Promise<{ rssi: number | null }>;
   writeCharacteristicWithResponseForDevice(
     id: string,
     serviceUUID: string,

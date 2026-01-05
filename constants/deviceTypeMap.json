@@ -3,5 +3,6 @@
   "fff0": "stimulator-basic",
   "180d": "sensor-hr",
   "0000ffe0-0000-1000-8000-00805f9b34fb": "sensor-simple",
-  "a0a4c680-96be-4222-b41e-98ea76b0120c": "tns"
+  "a0a4c680-96be-4222-b41e-98ea76b0120c": "tns",
+  "a0a4e690-96be-4222-b41e-98ea76b0120c": "mlx97"
 }

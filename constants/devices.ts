@@ -87,7 +87,7 @@ export function deviceIconForType(type: DeviceTypeKey): string {
   if (t.includes("stim")) return "bolt";
   if (t.includes("ecg")) return "ecg";
   if (t.includes("sensor")) return "sensor";
-  return "device-generic";
+  return "";
 }
 
 export function listKnownServiceUUIDs(): string[] {

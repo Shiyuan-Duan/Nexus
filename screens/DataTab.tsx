@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, FlatList } from "react-native";
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { listDatasets, start as startPackager } from "../services/data/packager";
 
 export const DataTab: React.FC = () => {
@@ -12,7 +13,7 @@ export const DataTab: React.FC = () => {
 
   const data = listDatasets();
   return (
-    <View style={{ flex: 1 }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#f6f7f8' }} edges={['top','left','right','bottom']}>
       <Text style={{ padding: 12, fontSize: 18, fontWeight: "600" }}>Packaged Data</Text>
       <FlatList
         data={data}
@@ -25,9 +26,8 @@ export const DataTab: React.FC = () => {
         )}
         ListEmptyComponent={<Text style={{ padding: 12, color: "#6b7280" }}>No datasets yet</Text>}
       />
-    </View>
+    </SafeAreaView>
   );
 };
 
 export default DataTab;
-

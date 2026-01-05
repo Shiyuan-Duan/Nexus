@@ -1,4 +1,5 @@
 import { Advertisement, DeviceIdentity, classifyAdvertisement, deviceIconForType } from "../constants/devices";
+import { getItem, setItem } from "../services/storage/storage";
 import { estimateStrength, scan as bleScan, connect as bleConnect, disconnect as bleDisconnect, type BleManagerLike } from "../services/ble/bleClient";
 import type { ConnectionStrength } from "../services/ble/bleTypes";
 
@@ -6,6 +7,10 @@ type DiscoveredItem = { id: string; name: string; adv: Advertisement; rssi?: num
 
 const discovered: DiscoveredItem[] = [];
 const connected: DeviceIdentity[] = [];
+const history: DeviceIdentity[] = [];
+const HISTORY_STORAGE_KEY = "nexus:device-history";
+let historyHydrated = false;
+let historyHydrating: Promise<void> | null = null;
 const strengths: Record<string, ConnectionStrength> = {};
 let scanStopper: { stop: () => void } | null = null;
 const listeners = new Set<() => void>();
@@ -43,15 +48,26 @@ export function classifyAndAddConnected(id: string): DeviceIdentity | null {
     type,
     icon: deviceIconForType(type),
   };
-  const exists = connected.some(x => x.id === id);
-  if (!exists) connected.push(identity);
+  upsertConnected(identity);
   emit();
   return identity;
 }
 
+function upsertConnected(identity: DeviceIdentity): void {
+  const idx = connected.findIndex(x => x.id === identity.id);
+  if (idx >= 0) {
+    connected[idx] = identity;
+  } else {
+    connected.push(identity);
+  }
+  upsertHistory(identity);
+}
+
 export function removeConnected(id: string): void {
   const idx = connected.findIndex(x => x.id === id);
-  if (idx >= 0) connected.splice(idx, 1);
+  if (idx >= 0) {
+    connected.splice(idx, 1);
+  }
   emit();
 }
 
@@ -62,6 +78,19 @@ export function setStrength(id: string, rssi?: number): void {
 
 export function listConnected(): DeviceIdentity[] {
   return connected.slice();
+}
+
+export function listHistory(): DeviceIdentity[] {
+  return history.slice();
+}
+
+export function removeHistory(id: string): void {
+  const idx = history.findIndex(x => x.id === id);
+  if (idx >= 0) {
+    history.splice(idx, 1);
+    void persistHistory();
+    emit();
+  }
 }
 
 export function listDiscovered(): DiscoveredItem[] {
@@ -155,11 +184,101 @@ export async function restartScan(manager?: BleManagerLike): Promise<void> {
 
 export async function connectDiscovered(id: string, manager: BleManagerLike): Promise<DeviceIdentity | null> {
   await bleConnect(id, manager);
+  const d = discovered.find(x => x.id === id);
+  if (d && typeof d.rssi === "number") {
+    setStrength(id, d.rssi);
+  }
   const identity = classifyAndAddConnected(id);
   return identity;
 }
 
+export async function connectKnown(id: string, manager: BleManagerLike): Promise<DeviceIdentity | null> {
+  await bleConnect(id, manager);
+  const existing = connected.find(x => x.id === id);
+  if (existing) return existing;
+  const fromHistory = history.find(x => x.id === id);
+  if (fromHistory) {
+    upsertConnected(fromHistory);
+    emit();
+    return fromHistory;
+  }
+  const d = discovered.find(x => x.id === id);
+  if (d) {
+    return classifyAndAddConnected(id);
+  }
+  const identity: DeviceIdentity = {
+    id,
+    name: "Unknown",
+    type: "unknown",
+    icon: deviceIconForType("unknown"),
+  };
+  upsertConnected(identity);
+  emit();
+  return identity;
+}
+
+function upsertHistory(identity: DeviceIdentity): void {
+  const idx = history.findIndex(x => x.id === identity.id);
+  if (idx >= 0) {
+    history[idx] = identity;
+  } else {
+    history.push(identity);
+  }
+  void persistHistory();
+}
+
+export async function hydrateHistory(): Promise<void> {
+  if (historyHydrated) return;
+  if (historyHydrating) return historyHydrating;
+  historyHydrating = (async () => {
+    try {
+      const raw = await getItem(HISTORY_STORAGE_KEY);
+      if (!raw) {
+        historyHydrated = true;
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        history.length = 0;
+        for (const item of parsed) {
+          if (!item || typeof item !== "object") continue;
+          const id = String((item as any).id || "").trim();
+          if (!id) continue;
+          history.push({
+            id,
+            name: String((item as any).name || "Unknown"),
+            type: String((item as any).type || "unknown"),
+            icon: typeof (item as any).icon === "string" ? (item as any).icon : undefined,
+          });
+        }
+      }
+    } catch {
+      // ignore corrupted history
+    } finally {
+      historyHydrated = true;
+      emit();
+    }
+  })();
+  return historyHydrating.finally(() => {
+    historyHydrating = null;
+  });
+}
+
+async function persistHistory(): Promise<void> {
+  try {
+    await setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export async function disconnectDevice(id: string, manager: BleManagerLike): Promise<void> {
-  await bleDisconnect(id, manager);
-  removeConnected(id);
+  try {
+    await bleDisconnect(id, manager);
+  } catch {
+    // Swallow disconnect errors (already disconnected, etc.)
+  } finally {
+    // Ensure UI updates regardless of underlying BLE state
+    removeConnected(id);
+  }
 }

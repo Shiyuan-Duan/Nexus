@@ -3,7 +3,7 @@ import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 export default function TabLayout() {
   return (
-    <Tabs initialRouteName="devices/index">
+    <Tabs initialRouteName="devices/index" screenOptions={{ headerShown: false }}>
       <Tabs.Screen
         name="devices/index"
         options={{

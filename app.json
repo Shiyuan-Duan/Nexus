@@ -2,36 +2,51 @@
   "expo": {
     "name": "Nexus",
     "slug": "Nexus",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "nexus",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+
     "ios": {
       "supportsTablet": true,
+      "buildNumber": "1",
+      "bundleIdentifier": "com.shiyuan-duan.Nexus",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to connect to lab devices."
+        "NSBluetoothAlwaysUsageDescription": "Nexus uses Bluetooth to connect to your biomedical sensors.",
+        "NSBluetoothPeripheralUsageDescription": "Nexus needs Bluetooth access to communicate with devices.",
+        "UIBackgroundModes": [
+          "bluetooth-central",
+          "bluetooth-peripheral"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
+
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
+      "versionCode": 1,
       "package": "com.shiyuan_duan.Nexus",
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN"
       ]
     },
+
     "web": {
       "bundler": "metro",
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+
     "plugins": [
       [
         "react-native-ble-plx",
@@ -52,8 +67,14 @@
         }
       ]
     ],
-    "experiments": {
-      "typedRoutes": true
+
+    "experiments": { "typedRoutes": true },
+
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "6a7365db-5744-4058-a4c0-2d752585790a"
+      }
     }
   }
 }

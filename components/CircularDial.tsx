@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { RadialSlider } from 'react-native-radial-slider';
 
@@ -27,6 +27,16 @@ export default function CircularDial({
   children,
   disabled,
 }: Props) {
+  // Keep a ref of the last emitted value (after clamp/round) to avoid
+  // redundant onChange cascades that can cause update loops/jitter.
+  const lastEmittedRef = useRef<number>(-1);
+  const clampRound = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
+
+  // Sync the ref when the controlled value changes from outside
+  useEffect(() => {
+    lastEmittedRef.current = clampRound(value);
+  }, [value]);
+
   // Map `size` and styling to library props. Keep a small margin to avoid clipping.
   const radius = Math.max(40, size / 2 - 12);
   const sliderWidth = Math.max(8, stroke);
@@ -57,8 +67,22 @@ export default function CircularDial({
         isHideMarkerLine
         disabled={disabled}
         // Events
-        onChange={(v: number) => onChange(Math.max(0, Math.min(100, v)))}
-        onComplete={(v: number) => onComplete?.(Math.max(0, Math.min(100, Math.round(v))))}
+        onChange={(v: number) => {
+          const next = clampRound(v);
+          if (next !== lastEmittedRef.current) {
+            lastEmittedRef.current = next;
+            onChange(next);
+          }
+        }}
+        onComplete={(v: number) => {
+          const next = clampRound(v);
+          // Ensure final value is emitted once on release
+          if (next !== lastEmittedRef.current) {
+            lastEmittedRef.current = next;
+            onChange(next);
+          }
+          onComplete?.(next);
+        }}
       />
       {children ? <View style={styles.center}>{children}</View> : null}
     </View>
