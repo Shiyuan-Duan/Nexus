@@ -3,6 +3,7 @@ import StimulatorBasic from "./stimulator-basic";
 import SensorHr from "./sensor-hr";
 import Tns from "./tns";
 import Mlx97 from "./mlx97";
+import CsFg from "./cs_fg";
 
 export interface DevicePlugin {
   key: string;
@@ -11,7 +12,7 @@ export interface DevicePlugin {
   CardExtras?: React.ComponentType<{ device: DeviceIdentity }>;
 }
 
-const registry: DevicePlugin[] = [StimulatorBasic, SensorHr, Tns, Mlx97];
+const registry: DevicePlugin[] = [StimulatorBasic, SensorHr, Tns, Mlx97, CsFg];
 
 export function getPluginForType(type: string): DevicePlugin | null {
   for (const p of registry) if (p.matches(type)) return p;

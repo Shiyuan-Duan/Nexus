@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Button, Modal, FlatList, ActivityIndicator, Alert, Platform, RefreshControl, TouchableOpacity, Animated, StyleSheet } from "react-native";
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Swipeable } from "react-native-gesture-handler";
 import { DeviceCard } from "../components/DeviceCard";
 import { listConnected, listDiscovered, listHistory, subscribe, startScan, stopScan, connectDiscovered, connectKnown, getStrength, hydrateHistory, isScanning, clearDiscovered, getScanError, restartScan, disconnectDevice, setStrength, removeHistory } from "../state/devices.store";
+import { isRecording } from "../services/data/recorder";
 import { connect as bleConnect, estimateStrength } from "../services/ble/bleClient";
 import { getPluginForType } from "../plugins/registry";
 import { getBleManager, ensureBluetoothOn } from "../services/ble/bleManager";
@@ -59,6 +60,7 @@ export const DevicesTab: React.FC = () => {
     return map;
   }, [rev]);
   const manager = getBleManager();
+  const insets = useSafeAreaInsets();
   const scanError = useMemo(() => getScanError(), [rev]);
   const rssiRefreshRef = useRef(0);
   const reconnectRef = useRef<Record<string, number>>({});
@@ -198,6 +200,21 @@ export const DevicesTab: React.FC = () => {
   const plugin = current ? getPluginForType(current.type) : null;
   const Popup = plugin?.Popup;
 
+  const requestCloseModal = useCallback(() => {
+    if (isRecording()) {
+      Alert.alert(
+        "Recording in progress",
+        "A recording is still running. You can safely close this page, but recording will continue.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Close", style: "destructive", onPress: () => setModalId(null) },
+        ]
+      );
+      return;
+    }
+    setModalId(null);
+  }, []);
+
   // Auto-start scanning when modal opens; stop when it closes
   useEffect(() => {
     let mounted = true;
@@ -226,7 +243,7 @@ export const DevicesTab: React.FC = () => {
   }, [scanModal]);
 
   return (
-    <SafeAreaView style={styles.screen} edges={['top','left','right']}>
+    <SafeAreaView style={styles.screen} edges={['top','left','right','bottom']}>
       <View style={styles.headerRow}>
         <Text style={styles.title}>Devices</Text>
         <TouchableOpacity style={styles.addButton} onPress={() => setScanModal(true)}>
@@ -497,11 +514,11 @@ export const DevicesTab: React.FC = () => {
         </View>
       ) : null}
 
-      <Modal visible={!!current} animationType="slide" onRequestClose={() => setModalId(null)}>
+      <Modal visible={!!current} animationType="slide" onRequestClose={requestCloseModal}>
         <SafeAreaView style={styles.modalScreen} edges={['top','left','right','bottom']}>
-          <View style={{ padding: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <View style={[styles.modalHeader, { paddingTop: insets.top + 8 }]}>
             <Text style={{ fontSize: 18, fontWeight: "600" }}>{current?.name}</Text>
-            <Button title="Close" onPress={() => setModalId(null)} />
+            <Button title="Close" onPress={requestCloseModal} />
           </View>
           {Popup && current ? (
             <Popup device={current} />
@@ -532,6 +549,13 @@ const styles = StyleSheet.create({
   modalScreen: {
     flex: 1,
     backgroundColor: '#f6f7f8',
+  },
+  modalHeader: {
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
   },
   headerRow: {
     paddingHorizontal: 12,

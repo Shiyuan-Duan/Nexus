@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View, ActivityIndicator, Switch, StyleSheet, TouchableOpacity, Platform, ScrollView } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Line, Polyline } from "react-native-svg";
 import type { DeviceIdentity } from "../../constants/devices";
 import type { DevicePlugin } from "../registry";
@@ -428,11 +429,12 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
   }, [imuSamples]);
 
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.screenContent}
-      scrollEnabled={scrollEnabled}
-    >
+    <SafeAreaView style={styles.safe} edges={['top','left','right','bottom']}>
+      <ScrollView
+        style={styles.screen}
+        contentContainerStyle={styles.screenContent}
+        scrollEnabled={scrollEnabled}
+      >
       {/* Header */}
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
@@ -589,7 +591,8 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
           </View>
         </View>
       ) : null}
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
@@ -605,6 +608,10 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     padding: 16,
+    backgroundColor: '#f6f7f8',
+  },
+  safe: {
+    flex: 1,
     backgroundColor: '#f6f7f8',
   },
   screenContent: {
