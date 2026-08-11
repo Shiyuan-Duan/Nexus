@@ -38,3 +38,7 @@ yarn-error.*
 
 app-example
 
+
+__pycache__/
+*.pyc
+scripts.zip
