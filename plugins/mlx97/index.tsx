@@ -10,11 +10,13 @@ import { getStrength, subscribe as subscribeDevices } from "../../state/devices.
 import {
   MLX97_SERVICE_UUID,
   MLX97_CHAR_CTRL,
-  MLX97_CHAR_STREAM0,
-  MLX97_CHAR_STREAM1,
+  MLX97_CHAR_IMU,
+  MLX97_CHAR_STREAM,
   MLX97_CTRL_START,
   MLX97_CTRL_STOP,
+  parseMLX97ImuSample,
   parseMLX97Sample,
+  type MLX97ImuSample,
   type MLX97Sample,
 } from "../../services/ble/profiles/mlx97";
 import { publishSample } from "../../services/data/dataBus";
@@ -34,26 +36,25 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [last0, setLast0] = useState<MLX97Sample | null>(null);
-  const [last1, setLast1] = useState<MLX97Sample | null>(null);
-  const [series0, setSeries0] = useState<[number[], number[], number[]]>([[], [], []]);
-  const [series1, setSeries1] = useState<[number[], number[], number[]]>([[], [], []]);
-  const [axis0, setAxis0] = useState<Axis>("x");
-  const [axis1, setAxis1] = useState<Axis>("x");
-  const [axisOpen0, setAxisOpen0] = useState(false);
-  const [axisOpen1, setAxisOpen1] = useState(false);
+  const [last, setLast] = useState<MLX97Sample | null>(null);
+  const [series, setSeries] = useState<[number[], number[], number[]]>([[], [], []]);
+  const [hasImu, setHasImu] = useState(false);
+  const [lastImu, setLastImu] = useState<MLX97ImuSample | null>(null);
+  const [imuSeries, setImuSeries] = useState<ImuSeries>(emptyImuSeries);
+  const [axis, setAxis] = useState<Axis>("x");
+  const [axisOpen, setAxisOpen] = useState(false);
+  const [imuAxis, setImuAxis] = useState<ImuAxis>("accel");
   const [recording, setRecording] = useState(isRecording());
   const [activeId, setActiveId] = useState<string | null>(getActiveRecordingId());
   const [dotOn, setDotOn] = useState(false);
   const [eventNames, setEventNames] = useState<string[]>(() =>
     Array.from({ length: 6 }, (_, i) => `Event ${i + 1}`)
   );
-  const sub0Ref = useRef<{ unsubscribe: () => void } | null>(null);
-  const sub1Ref = useRef<{ unsubscribe: () => void } | null>(null);
-  const count0 = useRef(0);
-  const count1 = useRef(0);
-  const last0Ref = useRef<MLX97Sample | null>(null);
-  const last1Ref = useRef<MLX97Sample | null>(null);
+  const streamSubRef = useRef<{ unsubscribe: () => void } | null>(null);
+  const imuSubRef = useRef<{ unsubscribe: () => void } | null>(null);
+  const count = useRef(0);
+  const lastRef = useRef<MLX97Sample | null>(null);
+  const lastUiUpdateMs = useRef(0);
 
   useEffect(() => {
     const unsub = subscribeDevices(() => setRev((v) => v + 1));
@@ -69,24 +70,22 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
 
   const strength = useMemo(() => getStrength(device.id), [device.id, rev]);
 
-  const publishCombined = useCallback(() => {
-    const s0 = last0Ref.current;
-    const s1 = last1Ref.current;
-    if (!s0 || !s1) return;
-    const t = Math.max(s0.t_ms ?? 0, s1.t_ms ?? 0);
+  const publishSingle = useCallback(() => {
+    const s = lastRef.current;
+    if (!s) return;
     publishSample({
       deviceId: device.id,
-      t,
-      values: [s0.x, s0.y, s0.z, s1.x, s1.y, s1.z, Number.NaN],
+      t: s.t_ms ?? 0,
+      values: [s.x, s.y, s.z, Number.NaN, Number.NaN, Number.NaN, Number.NaN],
       kind: "mlx97",
     });
   }, [device.id]);
 
   const unsubscribeAll = useCallback(() => {
-    try { sub0Ref.current?.unsubscribe(); } catch {}
-    try { sub1Ref.current?.unsubscribe(); } catch {}
-    sub0Ref.current = null;
-    sub1Ref.current = null;
+    try { streamSubRef.current?.unsubscribe(); } catch {}
+    try { imuSubRef.current?.unsubscribe(); } catch {}
+    streamSubRef.current = null;
+    imuSubRef.current = null;
   }, []);
 
   const start = useCallback(async (): Promise<boolean> => {
@@ -95,6 +94,7 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     setErr(null);
     setLoading(true);
     try {
+      let hasImuChar = false;
       // Ensure services/characteristics are discovered before monitor/write
       if (typeof (manager as any).discoverAllServicesAndCharacteristicsForDevice === "function") {
         await (manager as any).discoverAllServicesAndCharacteristicsForDevice(device.id);
@@ -110,38 +110,41 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       if (typeof (manager as any).characteristicsForDevice === "function") {
         const chars = await (manager as any).characteristicsForDevice(device.id, MLX97_SERVICE_UUID);
         const set = new Set((chars || []).map((c: any) => String(c.uuid).toLowerCase()));
-        const need = [
-          MLX97_CHAR_STREAM0,
-          MLX97_CHAR_STREAM1,
+        hasImuChar = set.has(String(MLX97_CHAR_IMU).toLowerCase());
+        setHasImu(hasImuChar);
+        const mustHave = [
+          MLX97_CHAR_STREAM,
           MLX97_CHAR_CTRL,
         ].map((u) => String(u).toLowerCase());
-        const missing = need.filter((u) => !set.has(u));
-        if (missing.length > 0) {
-          throw new Error(`Missing MLX97 characteristic(s): ${missing.join(", ")}`);
+        const missingMust = mustHave.filter((u) => !set.has(u));
+        if (missingMust.length > 0) {
+          throw new Error(`Missing MLX97 characteristic(s): ${missingMust.join(", ")}`);
         }
       }
       // Subscribe first to avoid missing initial packets
-      count0.current = 0; count1.current = 0;
-      sub0Ref.current = monitor(device.id, MLX97_SERVICE_UUID, MLX97_CHAR_STREAM0, (data) => {
+      count.current = 0;
+      streamSubRef.current = monitor(device.id, MLX97_SERVICE_UUID, MLX97_CHAR_STREAM, (data) => {
         const s = parseMLX97Sample(data);
         if (s) {
-          count0.current += 1;
-          last0Ref.current = s;
-          setLast0(s);
-          setSeries0((prev) => appendSeries(prev, s));
-          publishCombined();
+          count.current += 1;
+          lastRef.current = s;
+          const now = Date.now();
+          if (now - lastUiUpdateMs.current >= 50) {
+            lastUiUpdateMs.current = now;
+            setLast(s);
+            setSeries((prev) => appendSeries(prev, s));
+          }
+          publishSingle();
         }
       }, manager);
-      sub1Ref.current = monitor(device.id, MLX97_SERVICE_UUID, MLX97_CHAR_STREAM1, (data) => {
-        const s = parseMLX97Sample(data);
-        if (s) {
-          count1.current += 1;
-          last1Ref.current = s;
-          setLast1(s);
-          setSeries1((prev) => appendSeries(prev, s));
-          publishCombined();
-        }
-      }, manager);
+      if (hasImuChar) {
+        imuSubRef.current = monitor(device.id, MLX97_SERVICE_UUID, MLX97_CHAR_IMU, (data) => {
+          const s = parseMLX97ImuSample(data);
+          if (!s) return;
+          setLastImu(s);
+          setImuSeries((prev) => appendImuSeries(prev, s));
+        }, manager);
+      }
       await write(device.id, MLX97_SERVICE_UUID, MLX97_CHAR_CTRL, MLX97_CTRL_START, manager);
       setRunning(true);
       return true;
@@ -153,7 +156,7 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     } finally {
       setLoading(false);
     }
-  }, [device.id, manager, running, unsubscribeAll]);
+  }, [device.id, manager, running, unsubscribeAll, publishSingle]);
 
   useEffect(() => {
     const unsub = subscribeRecorder(() => {
@@ -211,8 +214,7 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       setErr(e?.message ?? String(e));
     } finally {
       unsubscribeAll();
-      last0Ref.current = null;
-      last1Ref.current = null;
+      lastRef.current = null;
       setRunning(false);
       setLoading(false);
     }
@@ -310,13 +312,13 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
         ))}
       </View>
 
-      <Text style={styles.sectionHeader}>Stream 0</Text>
+      <Text style={styles.sectionHeader}>Stream</Text>
       <View style={styles.card}>
-        {last0 ? (
+        {last ? (
           <>
-            <Text style={styles.metricLine}>t = {last0.t_ms} ms</Text>
-            <Text style={styles.metricLine}>x = {last0.x}  y = {last0.y}  z = {last0.z}</Text>
-            <Text style={styles.subtle}>stat1=0x{(last0.stat1 ?? 0).toString(16).padStart(2,'0')} stat2=0x{(last0.stat2 ?? 0).toString(16).padStart(2,'0')}</Text>
+            <Text style={styles.metricLine}>t = {last.t_ms} ms</Text>
+            <Text style={styles.metricLine}>x = {last.x}  y = {last.y}  z = {last.z}</Text>
+            <Text style={styles.subtle}>stat1=0x{(last.stat1 ?? 0).toString(16).padStart(2,'0')} stat2=0x{(last.stat2 ?? 0).toString(16).padStart(2,'0')}</Text>
           </>
         ) : (
           <Text style={styles.subtle}>No data yet</Text>
@@ -328,17 +330,17 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
           <View style={styles.dropdownWrap}>
             <TouchableOpacity
               style={styles.dropdownButton}
-              onPress={() => setAxisOpen0((v) => !v)}
+              onPress={() => setAxisOpen((v) => !v)}
             >
-              <Text style={styles.dropdownButtonText}>{axis0.toUpperCase()}</Text>
+              <Text style={styles.dropdownButtonText}>{axis.toUpperCase()}</Text>
             </TouchableOpacity>
-            {axisOpen0 ? (
+            {axisOpen ? (
               <View style={styles.dropdownMenu}>
                 {AXES.map((a) => (
                   <TouchableOpacity
                     key={a}
                     style={styles.dropdownItem}
-                    onPress={() => { setAxis0(a); setAxisOpen0(false); }}
+                    onPress={() => { setAxis(a); setAxisOpen(false); }}
                   >
                     <Text style={styles.dropdownItemText}>{a.toUpperCase()}</Text>
                   </TouchableOpacity>
@@ -347,48 +349,42 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
             ) : null}
           </View>
         </View>
-        <SimpleLineChart series={[pickAxis(series0, axis0)]} colors={["#ef4444"]} height={140} />
+        <SimpleLineChart series={[pickAxis(series, axis)]} colors={["#ef4444"]} height={140} />
       </View>
-
-      <Text style={styles.sectionHeader}>Stream 1</Text>
-      <View style={styles.card}>
-        {last1 ? (
-          <>
-            <Text style={styles.metricLine}>t = {last1.t_ms} ms</Text>
-            <Text style={styles.metricLine}>x = {last1.x}  y = {last1.y}  z = {last1.z}</Text>
-            <Text style={styles.subtle}>stat1=0x{(last1.stat1 ?? 0).toString(16).padStart(2,'0')} stat2=0x{(last1.stat2 ?? 0).toString(16).padStart(2,'0')}</Text>
-          </>
-        ) : (
-          <Text style={styles.subtle}>No data yet</Text>
-        )}
-      </View>
-      <View style={styles.chartCard}>
-        <View style={styles.chartHeaderRow}>
-          <Text style={styles.chartTitle}>Live plot</Text>
-          <View style={styles.dropdownWrap}>
-            <TouchableOpacity
-              style={styles.dropdownButton}
-              onPress={() => setAxisOpen1((v) => !v)}
-            >
-              <Text style={styles.dropdownButtonText}>{axis1.toUpperCase()}</Text>
-            </TouchableOpacity>
-            {axisOpen1 ? (
-              <View style={styles.dropdownMenu}>
-                {AXES.map((a) => (
-                  <TouchableOpacity
-                    key={a}
-                    style={styles.dropdownItem}
-                    onPress={() => { setAxis1(a); setAxisOpen1(false); }}
-                  >
-                    <Text style={styles.dropdownItemText}>{a.toUpperCase()}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            ) : null}
+      {hasImu ? (
+        <>
+          <Text style={styles.sectionHeader}>IMU</Text>
+          <View style={styles.card}>
+            {lastImu ? (
+              <>
+                <Text style={styles.metricLine}>t = {lastImu.t_ms} ms</Text>
+                <Text style={styles.metricLine}>accel (mg): {lastImu.ax}  {lastImu.ay}  {lastImu.az}</Text>
+                <Text style={styles.metricLine}>gyro (dps x10): {lastImu.gx}  {lastImu.gy}  {lastImu.gz}</Text>
+              </>
+            ) : (
+              <Text style={styles.subtle}>Waiting for BMI270 data…</Text>
+            )}
           </View>
-        </View>
-        <SimpleLineChart series={[pickAxis(series1, axis1)]} colors={["#2563eb"]} height={140} />
-      </View>
+          <View style={styles.chartCard}>
+            <View style={styles.chartHeaderRow}>
+              <Text style={styles.chartTitle}>IMU plot</Text>
+              <View style={styles.dropdownWrap}>
+                <TouchableOpacity
+                  style={styles.dropdownButton}
+                  onPress={() => setImuAxis((prev) => prev === "accel" ? "gyro" : "accel")}
+                >
+                  <Text style={styles.dropdownButtonText}>{imuAxis === "accel" ? "ACCEL" : "GYRO"}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+            <SimpleLineChart
+              series={imuAxis === "accel" ? imuSeries.accel : imuSeries.gyro}
+              colors={imuAxis === "accel" ? ["#2563eb", "#16a34a", "#dc2626"] : ["#7c3aed", "#ea580c", "#0891b2"]}
+              height={160}
+            />
+          </View>
+        </>
+      ) : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -406,6 +402,16 @@ const MLX97_PLOT_MAX = 120;
 const MLX97_PLOT_MIN = 6;
 const AXES = ["x", "y", "z"] as const;
 type Axis = (typeof AXES)[number];
+type ImuAxis = "accel" | "gyro";
+type ImuSeries = {
+  accel: [number[], number[], number[]];
+  gyro: [number[], number[], number[]];
+};
+
+const emptyImuSeries = (): ImuSeries => ({
+  accel: [[], [], []],
+  gyro: [[], [], []],
+});
 
 const appendSeries = (
   prev: [number[], number[], number[]],
@@ -416,6 +422,23 @@ const appendSeries = (
   const next2 = [...prev[2], s.z].slice(-MLX97_PLOT_MAX);
   return [next0, next1, next2];
 };
+
+const appendImuSeries = (
+  prev: ImuSeries,
+  s: MLX97ImuSample
+): ImuSeries => ({
+  accel: [
+    [...prev.accel[0], s.ax].slice(-MLX97_PLOT_MAX),
+    [...prev.accel[1], s.ay].slice(-MLX97_PLOT_MAX),
+    [...prev.accel[2], s.az].slice(-MLX97_PLOT_MAX),
+  ],
+  gyro: [
+    [...prev.gyro[0], s.gx / 10].slice(-MLX97_PLOT_MAX),
+    [...prev.gyro[1], s.gy / 10].slice(-MLX97_PLOT_MAX),
+    [...prev.gyro[2], s.gz / 10].slice(-MLX97_PLOT_MAX),
+  ],
+});
+
 
 const pickAxis = (series: [number[], number[], number[]], axis: Axis): number[] => {
   switch (axis) {

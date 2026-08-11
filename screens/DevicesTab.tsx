@@ -3,9 +3,9 @@ import { View, Text, Button, Modal, FlatList, ActivityIndicator, Alert, Platform
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Swipeable } from "react-native-gesture-handler";
 import { DeviceCard } from "../components/DeviceCard";
-import { listConnected, listDiscovered, listHistory, subscribe, startScan, stopScan, connectDiscovered, connectKnown, getStrength, hydrateHistory, isScanning, clearDiscovered, getScanError, restartScan, disconnectDevice, setStrength, removeHistory } from "../state/devices.store";
+import { listConnected, listDiscovered, listHistory, subscribe, startScan, stopScan, connectDiscovered, connectKnown, getStrength, hydrateHistory, isScanning, clearDiscovered, getScanError, restartScan, disconnectDevice, setStrength, removeHistory, removeConnected } from "../state/devices.store";
 import { isRecording } from "../services/data/recorder";
-import { connect as bleConnect, estimateStrength } from "../services/ble/bleClient";
+import { estimateStrength } from "../services/ble/bleClient";
 import { getPluginForType } from "../plugins/registry";
 import { getBleManager, ensureBluetoothOn } from "../services/ble/bleManager";
 import { ensureAndroidBlePermissions } from "../services/ble/permissions";
@@ -13,6 +13,7 @@ import { ensureAndroidBlePermissions } from "../services/ble/permissions";
 export const DevicesTab: React.FC = () => {
   const [rev, setRev] = useState(0);
   const [modalId, setModalId] = useState<string | null>(null);
+  const [modalDevice, setModalDevice] = useState<ReturnType<typeof listConnected>[number] | null>(null);
   const [scanModal, setScanModal] = useState(false);
   const [btState, setBtState] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -33,15 +34,11 @@ export const DevicesTab: React.FC = () => {
   }, []);
 
   const connected = useMemo(() => listConnected(), [rev]);
-  const connectedActive = useMemo(
-    () => connected.filter((d) => getStrength(d.id) !== "disconnected"),
-    [connected, rev]
-  );
   const history = useMemo(() => {
     const known = listHistory();
-    const connectedIds = new Set(connectedActive.map((d) => d.id));
+    const connectedIds = new Set(connected.map((d) => d.id));
     return known.filter((d) => !connectedIds.has(d.id));
-  }, [connectedActive, rev]);
+  }, [connected, rev]);
   const discovered = useMemo(() => {
     // Filter out unnamed devices; stable order by firstSeen
     return listDiscovered()
@@ -63,7 +60,6 @@ export const DevicesTab: React.FC = () => {
   const insets = useSafeAreaInsets();
   const scanError = useMemo(() => getScanError(), [rev]);
   const rssiRefreshRef = useRef(0);
-  const reconnectRef = useRef<Record<string, number>>({});
 
   // Pop up when native layer is busy due to frequent rescans
   const prevScanErrorRef = useRef<string | null>(null);
@@ -112,39 +108,31 @@ export const DevicesTab: React.FC = () => {
   }, [manager]);
 
   useEffect(() => {
-    if (!manager) return;
+    if (!manager || typeof (manager as any).isDeviceConnected !== "function") return;
     let cancelled = false;
-    const interval = setInterval(async () => {
+    const syncConnectedState = async () => {
       if (cancelled) return;
       const devices = listConnected();
-      if (devices.length === 0) return;
-      const now = Date.now();
       for (const d of devices) {
-        const strength = getStrength(d.id);
-        if (strength !== "disconnected") continue;
-        const lastTry = reconnectRef.current[d.id] ?? 0;
-        if (now - lastTry < 8000) continue;
-        reconnectRef.current[d.id] = now;
         try {
-          await bleConnect(d.id, manager);
-          if (typeof (manager as any).readRSSIForDevice === "function") {
-            try {
-              const res = await (manager as any).readRSSIForDevice(d.id);
-              if (!cancelled && typeof res?.rssi === "number") {
-                setStrength(d.id, res.rssi);
-              }
-            } catch {}
+          const ok = await (manager as any).isDeviceConnected(d.id);
+          if (!ok && !cancelled) {
+            removeConnected(d.id);
           }
         } catch {
-          if (!cancelled) setStrength(d.id, undefined);
+          if (!cancelled) {
+            removeConnected(d.id);
+          }
         }
       }
-    }, 6000);
+    };
+    const interval = setInterval(syncConnectedState, 2000);
+    void syncConnectedState();
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [manager]);
+  }, [manager, modalId]);
 
   useEffect(() => {
     if (!manager) return;
@@ -196,7 +184,13 @@ export const DevicesTab: React.FC = () => {
     [discoveredById]
   );
 
-  const current = connected.find((d) => d.id === modalId) || null;
+  useEffect(() => {
+    if (!modalId) return;
+    const live = connected.find((d) => d.id === modalId);
+    if (live) setModalDevice(live);
+  }, [connected, modalId]);
+
+  const current = connected.find((d) => d.id === modalId) || modalDevice;
   const plugin = current ? getPluginForType(current.type) : null;
   const Popup = plugin?.Popup;
 
@@ -207,12 +201,13 @@ export const DevicesTab: React.FC = () => {
         "A recording is still running. You can safely close this page, but recording will continue.",
         [
           { text: "Cancel", style: "cancel" },
-          { text: "Close", style: "destructive", onPress: () => setModalId(null) },
+          { text: "Close", style: "destructive", onPress: () => { setModalId(null); setModalDevice(null); } },
         ]
       );
       return;
     }
     setModalId(null);
+    setModalDevice(null);
   }, []);
 
   // Auto-start scanning when modal opens; stop when it closes
@@ -254,7 +249,7 @@ export const DevicesTab: React.FC = () => {
       <Text style={styles.sectionHeader}>Connected</Text>
 
       <FlatList
-        data={connectedActive}
+        data={connected}
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 16, gap: 12 }}
         renderItem={({ item }) => (
@@ -272,7 +267,10 @@ export const DevicesTab: React.FC = () => {
                       onPress={async () => {
                         if (manager) {
                           await disconnectDevice(item.id, manager);
-                          if (modalId === item.id) setModalId(null);
+                          if (modalId === item.id) {
+                            setModalId(null);
+                            setModalDevice(null);
+                          }
                         }
                       }}
                       style={{ paddingVertical: 12, paddingHorizontal: 16 }}
@@ -287,7 +285,10 @@ export const DevicesTab: React.FC = () => {
             <DeviceCard
               device={item}
               strength={getStrength(item.id)}
-              onPress={() => setModalId(item.id)}
+              onPress={() => {
+                setModalId(item.id);
+                setModalDevice(item);
+              }}
             />
           </Swipeable>
         )}
@@ -336,8 +337,9 @@ export const DevicesTab: React.FC = () => {
                 if (!manager || historyConnectingId) return;
                 setHistoryConnectingId(item.id);
                 try {
-                  await connectKnown(item.id, manager);
+                  const connectedDevice = await connectKnown(item.id, manager);
                   setModalId(item.id);
+                  setModalDevice(connectedDevice ?? item);
                 } catch (e: any) {
                   Alert.alert("Connect Failed", e?.message ?? String(e));
                 } finally {
@@ -357,7 +359,7 @@ export const DevicesTab: React.FC = () => {
 
       <Modal visible={scanModal} animationType="slide" onRequestClose={() => setScanModal(false)}>
         <SafeAreaView style={styles.modalScreen} edges={['top','left','right','bottom']}>
-          <View style={styles.modalHeaderRow}>
+          <View style={[styles.modalHeaderRow, { paddingTop: insets.top + 8 }]}>
             <Text style={styles.title}>Add Device</Text>
             <TouchableOpacity onPress={() => { stopScan(); setScanModal(false); }}>
               <Text style={styles.linkButtonText}>Done</Text>
@@ -567,7 +569,7 @@ const styles = StyleSheet.create({
   },
   modalHeaderRow: {
     paddingHorizontal: 12,
-    paddingTop: 12,
+    paddingTop: 8,
     paddingBottom: 8,
     flexDirection: 'row',
     alignItems: 'center',

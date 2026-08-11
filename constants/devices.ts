@@ -85,7 +85,7 @@ export function classifyAdvertisement(adv: Advertisement): { type: DeviceTypeKey
 export function deviceIconForType(type: DeviceTypeKey): string {
   const t = type.toLowerCase();
   if (t.includes("stim")) return "bolt";
-  if (t.includes("ecg")) return "ecg";
+  if (t.includes("ecg") || t.includes("max30003")) return "ecg";
   if (t.includes("sensor")) return "sensor";
   return "";
 }

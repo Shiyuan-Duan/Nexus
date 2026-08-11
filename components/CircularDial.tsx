@@ -84,7 +84,11 @@ export default function CircularDial({
           onComplete?.(next);
         }}
       />
-      {children ? <View style={styles.center}>{children}</View> : null}
+      {children ? (
+        <View style={styles.center} pointerEvents="box-none">
+          <View pointerEvents="auto">{children}</View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -102,6 +106,5 @@ const styles = StyleSheet.create({
     bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    pointerEvents: 'none',
   },
 });

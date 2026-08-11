@@ -1,24 +1,47 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Text, View, ActivityIndicator, Switch, StyleSheet, TouchableOpacity, Platform, ScrollView } from "react-native";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Line, Polyline } from "react-native-svg";
+import CircularDial from "../../components/CircularDial";
 import type { DeviceIdentity } from "../../constants/devices";
-import type { DevicePlugin } from "../registry";
-import { getBleManager } from "../../services/ble/bleManager";
 import { connect, monitor, read, write } from "../../services/ble/bleClient";
-import { getStrength, setStrength, subscribe } from "../../state/devices.store";
+import { getBleManager } from "../../services/ble/bleManager";
 import {
-  TNS_SERVICE_UUID,
-  TNS_CHAR_SWITCH,
   TNS_CHAR_AMPLITUDE,
+  TNS_CHAR_AMPLITUDE_CODE,
   TNS_CHAR_FREQUENCY,
   TNS_CHAR_IMU,
+  TNS_CHAR_SWITCH,
+  TNS_SERVICE_UUID,
 } from "../../services/ble/profiles/tns";
-import CircularDial from "../../components/CircularDial";
+import { getStrength, setStrength, subscribe } from "../../state/devices.store";
+import type { DevicePlugin } from "../registry";
 
 const IMU_MAX_SAMPLES = 120;
 const IMU_SAMPLE_MIN = 2;
 const RECONNECT_TIMEOUT_MS = 6000;
+
+/** UI assumes your firmware span is 25 mA full-scale */
+const STIM_FULL_SCALE_MA = 25;
 
 function strengthColor(s?: string): string {
   if (s === "strong") return "#22c55e";
@@ -34,7 +57,8 @@ const u32le = (data: Uint8Array, offset: number): number =>
   (data[offset] |
     (data[offset + 1] << 8) |
     (data[offset + 2] << 16) |
-    (data[offset + 3] << 24)) >>> 0;
+    (data[offset + 3] << 24)) >>>
+  0;
 
 const i16le = (data: Uint8Array, offset: number): number => {
   const v = (data[offset] | (data[offset + 1] << 8)) & 0xffff;
@@ -64,7 +88,11 @@ const parseImuSample = (data: Uint8Array): ImuSample | null => {
   };
 };
 
-const withTimeout = async <T,>(p: Promise<T>, ms: number, message: string): Promise<T> => {
+const withTimeout = async <T,>(
+  p: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<T>((_, reject) => {
     timer = setTimeout(() => reject(new Error(message)), ms);
@@ -123,7 +151,14 @@ const SimpleLineChart: React.FC<{
         <Text style={styles.chartEmpty}>Waiting for IMU data…</Text>
       ) : (
         <Svg width={width} height={height}>
-          <Line x1={0} y1={height / 2} x2={width} y2={height / 2} stroke="#e5e7eb" strokeWidth={1} />
+          <Line
+            x1={0}
+            y1={height / 2}
+            x2={width}
+            y2={height / 2}
+            stroke="#e5e7eb"
+            strokeWidth={1}
+          />
           {series.map((s, idx) => (
             <Polyline
               key={idx}
@@ -145,10 +180,12 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
   const [err, setErr] = useState<string | null>(null);
   const [switchByte, setSwitchByte] = useState<number | null>(null);
   const [ampByte, setAmpByte] = useState<number | null>(null);
+  const [ampCode, setAmpCode] = useState<number | null>(null);
   const [freqHz, setFreqHz] = useState<number | null>(null);
   const [writingSwitch, setWritingSwitch] = useState(false);
   const [writingAmp, setWritingAmp] = useState(false);
   const [writingFreq, setWritingFreq] = useState(false);
+  const [dialActive, setDialActive] = useState(false);
   const [imuEnabled, setImuEnabled] = useState(false);
   const [imuSamples, setImuSamples] = useState<ImuSample[]>([]);
   const [scrollEnabled, setScrollEnabled] = useState(true);
@@ -158,11 +195,59 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
   const wasLinkDownRef = useRef(false);
   const [rev, setRev] = useState(0);
 
+  // Modal for precise mA entry
+  const [maModalVisible, setMaModalVisible] = useState(false);
+  const [maInput, setMaInput] = useState("");
+  const [maInputErr, setMaInputErr] = useState<string | null>(null);
+
   useEffect(() => {
     const unsub = subscribe(() => setRev((v) => v + 1));
     return unsub;
   }, []);
 
+  const amplitudeToCurrent = (a: number | null): number => {
+    const pct = Math.max(0, Math.min(100, a ?? 0));
+    return (pct * STIM_FULL_SCALE_MA) / 100;
+  };
+  const codeToCurrent = (code: number | null): number => {
+    const c = Math.max(0, Math.min(65535, code ?? 0));
+    return (c * STIM_FULL_SCALE_MA) / 65535;
+  };
+  const codeToPct = (code: number | null): number => {
+    const c = Math.max(0, Math.min(65535, code ?? 0));
+    return Math.round((c * 100) / 65535);
+  };
+
+  const controlsDisabled = loading || writingAmp || linkDown || reconnecting;
+
+  const openMaModal = useCallback(() => {
+    const cur = codeToCurrent(
+      ampCode ?? (ampByte != null ? Math.round((ampByte / 100) * 65535) : 0),
+    ).toFixed(2);
+    setMaInput(cur);
+    setMaInputErr(null);
+    setMaModalVisible(true);
+  }, [ampByte, ampCode]);
+
+  const closeMaModal = useCallback(() => {
+    setMaModalVisible(false);
+    setMaInputErr(null);
+  }, []);
+
+  const maPreview = useMemo(() => {
+    const raw = maInput.trim().replace(",", ".");
+    const v = Number.parseFloat(raw);
+    if (!Number.isFinite(v)) return null;
+
+    const clampedMa = Math.max(0, Math.min(STIM_FULL_SCALE_MA, v));
+    const code = Math.max(
+      0,
+      Math.min(65535, Math.round((clampedMa / STIM_FULL_SCALE_MA) * 65535)),
+    );
+    const pct = codeToPct(code);
+    const actualMa = (code * STIM_FULL_SCALE_MA) / 65535;
+    return { pct, actualMa, code };
+  }, [maInput]);
 
   const readAll = useCallback(async () => {
     if (!manager) {
@@ -172,14 +257,20 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     setLoading(true);
     setErr(null);
     try {
-      // Ensure services/characteristics are discovered before reading
-      if (typeof (manager as any).discoverAllServicesAndCharacteristicsForDevice === 'function') {
-        await (manager as any).discoverAllServicesAndCharacteristicsForDevice(device.id);
+      if (
+        typeof (manager as any)
+          .discoverAllServicesAndCharacteristicsForDevice === "function"
+      ) {
+        await (manager as any).discoverAllServicesAndCharacteristicsForDevice(
+          device.id,
+        );
       }
-      if (typeof (manager as any).servicesForDevice === 'function') {
+      if (typeof (manager as any).servicesForDevice === "function") {
         try {
           const svcs = await (manager as any).servicesForDevice(device.id);
-          const list = (svcs || []).map((s: any) => String(s.uuid).toLowerCase());
+          const list = (svcs || []).map((s: any) =>
+            String(s.uuid).toLowerCase(),
+          );
           const want = String(TNS_SERVICE_UUID).toLowerCase();
           const has = list.includes(want);
           if (!has) {
@@ -188,19 +279,45 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
         } catch {}
       }
 
-      const sw = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_SWITCH, manager);
+      const sw = await read(
+        device.id,
+        TNS_SERVICE_UUID,
+        TNS_CHAR_SWITCH,
+        manager,
+      );
       setSwitchByte(sw.length > 0 ? sw[0] : null);
 
-      const amp = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_AMPLITUDE, manager);
+      const amp = await read(
+        device.id,
+        TNS_SERVICE_UUID,
+        TNS_CHAR_AMPLITUDE,
+        manager,
+      );
       const a = amp.length > 0 ? amp[0] : null;
-      setAmpByte(typeof a === 'number' ? Math.max(0, Math.min(100, a)) : a);
+      setAmpByte(typeof a === "number" ? Math.max(0, Math.min(100, a)) : a);
 
-      const freq = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_FREQUENCY, manager);
+      const ampC = await read(
+        device.id,
+        TNS_SERVICE_UUID,
+        TNS_CHAR_AMPLITUDE_CODE,
+        manager,
+      );
+      if (ampC.length >= 2) {
+        const code = u16le(ampC, 0);
+        setAmpCode(code);
+        setAmpByte(codeToPct(code));
+      }
+
+      const freq = await read(
+        device.id,
+        TNS_SERVICE_UUID,
+        TNS_CHAR_FREQUENCY,
+        manager,
+      );
       if (freq.length >= 2) {
         setFreqHz(u16le(freq, 0));
       }
       setLinkDown(false);
-
     } catch (e: any) {
       setErr(e?.message ?? String(e));
       setLinkDown(true);
@@ -209,8 +326,26 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     }
   }, [device.id, manager]);
 
+  const readAmpCode = useCallback(async () => {
+    if (!manager) return;
+    try {
+      const ampC = await read(
+        device.id,
+        TNS_SERVICE_UUID,
+        TNS_CHAR_AMPLITUDE_CODE,
+        manager,
+      );
+      if (ampC.length >= 2) {
+        const code = u16le(ampC, 0);
+        setAmpCode(code);
+        setAmpByte(codeToPct(code));
+      }
+    } catch {
+      // ignore transient read errors
+    }
+  }, [device.id, manager]);
+
   useEffect(() => {
-    // Auto-read once when opening
     readAll();
   }, [readAll]);
 
@@ -225,23 +360,33 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       setErr(null);
       try {
         const value = new Uint8Array([on ? 1 : 0]);
-        await write(device.id, TNS_SERVICE_UUID, TNS_CHAR_SWITCH, value, manager);
+        await write(
+          device.id,
+          TNS_SERVICE_UUID,
+          TNS_CHAR_SWITCH,
+          value,
+          manager,
+        );
         setLinkDown(false);
       } catch (e: any) {
         setErr(e?.message ?? String(e));
         setLinkDown(true);
       } finally {
-        // Read back to confirm
         try {
-          const sw = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_SWITCH, manager);
+          const sw = await read(
+            device.id,
+            TNS_SERVICE_UUID,
+            TNS_CHAR_SWITCH,
+            manager,
+          );
           setSwitchByte(sw.length > 0 ? sw[0] : null);
         } catch (e: any) {
-          setErr((prev) => prev ?? (e?.message ?? String(e)));
+          setErr((prev) => prev ?? e?.message ?? String(e));
         }
         setWritingSwitch(false);
       }
     },
-    [device.id, manager]
+    [device.id, manager, linkDown],
   );
 
   const writeAmp = useCallback(
@@ -256,25 +401,108 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       setErr(null);
       try {
         const value = new Uint8Array([clamped & 0xff]);
-        await write(device.id, TNS_SERVICE_UUID, TNS_CHAR_AMPLITUDE, value, manager);
+        await write(
+          device.id,
+          TNS_SERVICE_UUID,
+          TNS_CHAR_AMPLITUDE,
+          value,
+          manager,
+        );
         setLinkDown(false);
       } catch (e: any) {
         setErr(e?.message ?? String(e));
         setLinkDown(true);
       } finally {
-        // Read back to confirm
         try {
-          const rv = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_AMPLITUDE, manager);
+          const rv = await read(
+            device.id,
+            TNS_SERVICE_UUID,
+            TNS_CHAR_AMPLITUDE,
+            manager,
+          );
           const a2 = rv.length > 0 ? rv[0] : null;
-          setAmpByte(typeof a2 === 'number' ? Math.max(0, Math.min(100, a2)) : a2);
+          setAmpByte(
+            typeof a2 === "number" ? Math.max(0, Math.min(100, a2)) : a2,
+          );
         } catch (e: any) {
-          setErr((prev) => prev ?? (e?.message ?? String(e)));
+          setErr((prev) => prev ?? e?.message ?? String(e));
         }
         setWritingAmp(false);
       }
     },
-    [device.id, manager]
+    [device.id, manager, linkDown],
   );
+
+  const writeAmpCode = useCallback(
+    async (code: number) => {
+      if (!manager) {
+        setErr("BLE manager unavailable");
+        return;
+      }
+      if (linkDown) return;
+      const clamped = Math.max(0, Math.min(65535, Math.round(code)));
+      setWritingAmp(true);
+      setErr(null);
+      try {
+        const value = new Uint8Array([clamped & 0xff, (clamped >> 8) & 0xff]);
+        await write(
+          device.id,
+          TNS_SERVICE_UUID,
+          TNS_CHAR_AMPLITUDE_CODE,
+          value,
+          manager,
+        );
+        setLinkDown(false);
+      } catch (e: any) {
+        setErr(e?.message ?? String(e));
+        setLinkDown(true);
+      } finally {
+        try {
+          const rv = await read(
+            device.id,
+            TNS_SERVICE_UUID,
+            TNS_CHAR_AMPLITUDE_CODE,
+            manager,
+          );
+          if (rv.length >= 2) {
+            const code = u16le(rv, 0);
+            setAmpCode(code);
+            setAmpByte(codeToPct(code));
+          }
+        } catch (e: any) {
+          setErr((prev) => prev ?? e?.message ?? String(e));
+        }
+        setWritingAmp(false);
+      }
+    },
+    [device.id, manager, linkDown],
+  );
+
+  const commitMa = useCallback(async () => {
+    const raw = maInput.trim().replace(",", ".");
+    const v = Number.parseFloat(raw);
+
+    if (!Number.isFinite(v)) {
+      setMaInputErr("Enter a valid number, e.g., 1.25");
+      return;
+    }
+
+    const clampedMa = Math.max(
+      0,
+      Math.min(STIM_FULL_SCALE_MA, Math.round(v * 100) / 100),
+    );
+    const code = Math.max(
+      0,
+      Math.min(65535, Math.round((clampedMa / STIM_FULL_SCALE_MA) * 65535)),
+    );
+    const pct = codeToPct(code);
+
+    setMaModalVisible(false);
+    setMaInputErr(null);
+
+    setAmpByte(pct);
+    await writeAmpCode(code);
+  }, [maInput, writeAmpCode]);
 
   const writeFrequency = useCallback(
     async (hz: number) => {
@@ -288,30 +516,36 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       setErr(null);
       try {
         const value = new Uint8Array([clamped & 0xff, (clamped >> 8) & 0xff]);
-        await write(device.id, TNS_SERVICE_UUID, TNS_CHAR_FREQUENCY, value, manager);
+        await write(
+          device.id,
+          TNS_SERVICE_UUID,
+          TNS_CHAR_FREQUENCY,
+          value,
+          manager,
+        );
         setLinkDown(false);
       } catch (e: any) {
         setErr(e?.message ?? String(e));
         setLinkDown(true);
       } finally {
         try {
-          const rv = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_FREQUENCY, manager);
+          const rv = await read(
+            device.id,
+            TNS_SERVICE_UUID,
+            TNS_CHAR_FREQUENCY,
+            manager,
+          );
           if (rv.length >= 2) {
             setFreqHz(u16le(rv, 0));
           }
         } catch (e: any) {
-          setErr((prev) => prev ?? (e?.message ?? String(e)));
+          setErr((prev) => prev ?? e?.message ?? String(e));
         }
         setWritingFreq(false);
       }
     },
-    [device.id, manager]
+    [device.id, manager, linkDown],
   );
-
-  const amplitudeToCurrent = (a: number | null): number => {
-    const pct = Math.max(0, Math.min(100, a ?? 0));
-    return (pct * 25) / 100; // 0..25 mA
-  };
 
   useEffect(() => {
     if (!manager || !imuEnabled) {
@@ -330,12 +564,15 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
         setLinkDown(false);
         wasLinkDownRef.current = false;
         setImuSamples((prev) => {
-          const next = prev.length >= IMU_MAX_SAMPLES ? prev.slice(prev.length - IMU_MAX_SAMPLES + 1) : prev.slice();
+          const next =
+            prev.length >= IMU_MAX_SAMPLES
+              ? prev.slice(prev.length - IMU_MAX_SAMPLES + 1)
+              : prev.slice();
           next.push(sample);
           return next;
         });
       },
-      manager
+      manager,
     );
     imuSubRef.current = sub;
     return () => {
@@ -349,9 +586,15 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     let cancelled = false;
     const interval = setInterval(async () => {
       try {
-        const sw = await read(device.id, TNS_SERVICE_UUID, TNS_CHAR_SWITCH, manager);
+        const sw = await read(
+          device.id,
+          TNS_SERVICE_UUID,
+          TNS_CHAR_SWITCH,
+          manager,
+        );
         if (cancelled) return;
         setSwitchByte(sw.length > 0 ? sw[0] : null);
+        await readAmpCode();
         setLinkDown(false);
         if (wasLinkDownRef.current) {
           wasLinkDownRef.current = false;
@@ -375,7 +618,7 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [device.id, manager]);
+  }, [device.id, manager, readAll, readAmpCode]);
 
   useEffect(() => {
     if (linkDown) {
@@ -391,7 +634,11 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
     setReconnecting(true);
     setErr(null);
     try {
-      await withTimeout(connect(device.id, manager), RECONNECT_TIMEOUT_MS, "Reconnect timed out");
+      await withTimeout(
+        connect(device.id, manager),
+        RECONNECT_TIMEOUT_MS,
+        "Reconnect timed out",
+      );
       setLinkDown(false);
       wasLinkDownRef.current = false;
       await withTimeout(readAll(), RECONNECT_TIMEOUT_MS, "Sync timed out");
@@ -429,169 +676,319 @@ const Popup: React.FC<{ device: DeviceIdentity }> = ({ device }) => {
   }, [imuSamples]);
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top','left','right','bottom']}>
+    <SafeAreaView
+      style={styles.safe}
+      edges={["top", "left", "right", "bottom"]}
+    >
       <ScrollView
         style={styles.screen}
         contentContainerStyle={styles.screenContent}
         scrollEnabled={scrollEnabled}
       >
-      {/* Header */}
-      <View style={styles.headerRow}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.title}>TNS</Text>
-          <View style={styles.subtitleRow}>
-            <View style={[styles.dot, { backgroundColor: linkDown ? "#ef4444" : strengthColor(getStrength(device.id)) }]} />
-            <Text style={styles.subtitle}>{device.name}</Text>
+        {/* Header */}
+        <View style={styles.headerRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.title}>TNS</Text>
+            <View style={styles.subtitleRow}>
+              <View
+                style={[
+                  styles.dot,
+                  {
+                    backgroundColor: linkDown
+                      ? "#ef4444"
+                      : strengthColor(getStrength(device.id)),
+                  },
+                ]}
+              />
+              <Text style={styles.subtitle}>{device.name}</Text>
+            </View>
           </View>
+          <TouchableOpacity
+            style={styles.syncButton}
+            onPress={readAll}
+            disabled={loading}
+          >
+            <Text style={[styles.syncText, loading && { opacity: 0.6 }]}>
+              Sync
+            </Text>
+            {loading ? (
+              <ActivityIndicator size="small" style={{ marginLeft: 8 }} />
+            ) : null}
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity style={styles.syncButton} onPress={readAll} disabled={loading}>
-          <Text style={[styles.syncText, loading && { opacity: 0.6 }]}>Sync</Text>
-          {loading ? <ActivityIndicator size="small" style={{ marginLeft: 8 }} /> : null}
-        </TouchableOpacity>
-      </View>
 
-      {err ? (
-        <View style={styles.errorCard}>
-          <Text style={styles.errorText}>{err}</Text>
-        </View>
-      ) : null}
+        {err ? (
+          <View style={styles.errorCard}>
+            <Text style={styles.errorText}>{err}</Text>
+          </View>
+        ) : null}
 
-      {linkDown ? (
-        <View style={styles.disconnectCard}>
+        {linkDown ? (
+          <View style={styles.disconnectCard}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.disconnectTitle}>Device disconnected</Text>
+              <TouchableOpacity
+                style={[
+                  styles.reconnectButton,
+                  reconnecting && { opacity: 0.6 },
+                ]}
+                onPress={handleReconnect}
+                disabled={reconnecting}
+              >
+                <Text style={styles.reconnectText}>
+                  {reconnecting ? "Reconnecting..." : "Reconnect"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.disconnectSubtle}>
+              Controls are disabled until the device is back online.
+            </Text>
+          </View>
+        ) : null}
+
+        {/* Controls section */}
+        <Text style={styles.sectionHeader}>Controls</Text>
+
+        {/* Stimulation toggle card */}
+        <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.disconnectTitle}>Device disconnected</Text>
-            <TouchableOpacity
-              style={[styles.reconnectButton, reconnecting && { opacity: 0.6 }]}
-              onPress={handleReconnect}
-              disabled={reconnecting}
+            <Text style={styles.cardTitle}>Stimulation</Text>
+            <View style={styles.rowCenter}>
+              {writingSwitch ? (
+                <ActivityIndicator size="small" style={{ marginRight: 8 }} />
+              ) : null}
+              <Switch
+                value={!!(switchByte && switchByte !== 0)}
+                onValueChange={(v) => {
+                  setSwitchByte(v ? 1 : 0);
+                  writeSwitch(v);
+                }}
+                disabled={linkDown || writingSwitch || reconnecting}
+              />
+            </View>
+          </View>
+          <Text style={styles.cardSubtle}>{switchByte ? "On" : "Off"}</Text>
+        </View>
+
+        {/* Intensity dial card */}
+        <View style={[styles.card, styles.centered]}>
+          <Text style={styles.cardTitle}>Intensity</Text>
+          <View
+            onTouchStart={() => setScrollEnabled(false)}
+            onTouchEnd={() => setScrollEnabled(true)}
+            onTouchCancel={() => setScrollEnabled(true)}
+            onTouchMove={() => setScrollEnabled(false)}
+          >
+            <CircularDial
+              value={Math.max(0, Math.min(100, ampByte ?? 0))}
+              onChange={(v) => {
+                const pct = Math.max(0, Math.min(100, Math.round(v)));
+                setAmpByte(pct);
+                if (!dialActive) setDialActive(true);
+              }}
+              onComplete={(v) => {
+                const pct = Math.max(0, Math.min(100, Math.round(v)));
+                const code = Math.round((pct / 100) * 65535);
+                setAmpByte(pct);
+                setAmpCode(code);
+                writeAmpCode(code);
+                setDialActive(false);
+              }}
+              size={220}
+              stroke={18}
+              progressColor="#16a34a"
+              handleColor="#16a34a"
+              disabled={loading || writingAmp || linkDown || reconnecting}
             >
-              <Text style={styles.reconnectText}>{reconnecting ? "Reconnecting..." : "Reconnect"}</Text>
+              <View style={{ alignItems: "center" }}>
+                {writingAmp ? <ActivityIndicator size="small" /> : null}
+
+                <TouchableOpacity
+                  onPress={openMaModal}
+                  disabled={controlsDisabled}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.bigNumber}>
+                    {(dialActive
+                      ? amplitudeToCurrent(ampByte)
+                      : codeToCurrent(
+                          ampCode ??
+                            (ampByte != null
+                              ? Math.round((ampByte / 100) * 65535)
+                              : 0),
+                        )
+                    ).toFixed(2)}{" "}
+                    <Text style={styles.unit}>mA</Text>
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={styles.tapHint}>Tap value to enter</Text>
+                <Text style={styles.cardSubtle}>output</Text>
+              </View>
+            </CircularDial>
+          </View>
+          <Text style={[styles.cardSubtle, { marginTop: 6 }]}>
+            {Math.max(0, Math.min(100, ampByte ?? 0))}%
+          </Text>
+        </View>
+
+        {/* Frequency control */}
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardTitle}>Frequency</Text>
+            {writingFreq ? <ActivityIndicator size="small" /> : null}
+          </View>
+          <View style={styles.freqRow}>
+            <TouchableOpacity
+              style={styles.freqButton}
+              onPress={() => {
+                const next = Math.max(1, (freqHz ?? 5) - 1);
+                setFreqHz(next);
+                writeFrequency(next);
+              }}
+              disabled={writingFreq || linkDown || reconnecting}
+            >
+              <Text style={styles.freqButtonText}>-</Text>
+            </TouchableOpacity>
+            <Text style={styles.freqValue}>{freqHz ?? 5} Hz</Text>
+            <TouchableOpacity
+              style={styles.freqButton}
+              onPress={() => {
+                const next = Math.min(1000, (freqHz ?? 5) + 1);
+                setFreqHz(next);
+                writeFrequency(next);
+              }}
+              disabled={writingFreq || linkDown || reconnecting}
+            >
+              <Text style={styles.freqButtonText}>+</Text>
             </TouchableOpacity>
           </View>
-          <Text style={styles.disconnectSubtle}>Controls are disabled until the device is back online.</Text>
+          <Text style={styles.cardSubtle}>Default 5 Hz</Text>
         </View>
-      ) : null}
 
-      {/* Controls section */}
-      <Text style={styles.sectionHeader}>Controls</Text>
-
-      {/* Stimulation toggle card */}
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>Stimulation</Text>
-          <View style={styles.rowCenter}>
-            {writingSwitch ? <ActivityIndicator size="small" style={{ marginRight: 8 }} /> : null}
+        {/* IMU streaming */}
+        <View style={styles.card}>
+          <View style={styles.rowBetween}>
+            <Text style={styles.cardTitle}>IMU Streaming</Text>
             <Switch
-              value={!!(switchByte && switchByte !== 0)}
+              value={imuEnabled}
               onValueChange={(v) => {
-                // Optimistic update; confirmed on read-back
-                setSwitchByte(v ? 1 : 0);
-                writeSwitch(v);
+                setImuEnabled(v);
+                if (!v) setImuSamples([]);
               }}
-              disabled={linkDown || writingSwitch || reconnecting}
+              disabled={linkDown || reconnecting}
             />
           </View>
+          <Text style={styles.cardSubtle}>{imuEnabled ? "On" : "Off"}</Text>
         </View>
-        <Text style={styles.cardSubtle}>{switchByte ? 'On' : 'Off'}</Text>
-      </View>
 
-      {/* Intensity dial card */}
-      <View style={[styles.card, styles.centered]}>
-        <Text style={styles.cardTitle}>Intensity</Text>
-        <View
-          onTouchStart={() => setScrollEnabled(false)}
-          onTouchEnd={() => setScrollEnabled(true)}
-          onTouchCancel={() => setScrollEnabled(true)}
-          onTouchMove={() => setScrollEnabled(false)}
-        >
-          <CircularDial
-            value={Math.max(0, Math.min(100, ampByte ?? 0))}
-            onChange={(v) => setAmpByte(Math.max(0, Math.min(100, Math.round(v))))}
-            onComplete={(v) => writeAmp(v)}
-            size={220}
-            stroke={18}
-            progressColor="#16a34a"
-            handleColor="#16a34a"
-            disabled={loading || writingAmp || linkDown || reconnecting}
-          >
-            <View style={{ alignItems: 'center' }}>
-              {writingAmp ? <ActivityIndicator size="small" /> : null}
-              <Text style={styles.bigNumber}>{amplitudeToCurrent(ampByte).toFixed(2)} <Text style={styles.unit}>mA</Text></Text>
-              <Text style={styles.cardSubtle}>output</Text>
+        {imuEnabled ? (
+          <View style={[styles.card, styles.imuCard]}>
+            <Text style={styles.cardTitle}>IMU Live Plot</Text>
+            <Text style={styles.chartLabel}>Accel (mg)</Text>
+            <SimpleLineChart
+              series={accelSeries}
+              colors={["#0ea5e9", "#22c55e", "#f97316"]}
+              height={140}
+            />
+            <Text style={styles.chartLabel}>Gyro (deg/s)</Text>
+            <SimpleLineChart
+              series={gyroSeries}
+              colors={["#0ea5e9", "#22c55e", "#f97316"]}
+              height={140}
+            />
+            <View style={styles.legendRow}>
+              <View
+                style={[styles.legendDot, { backgroundColor: "#0ea5e9" }]}
+              />
+              <Text style={styles.legendText}>X</Text>
+              <View
+                style={[styles.legendDot, { backgroundColor: "#22c55e" }]}
+              />
+              <Text style={styles.legendText}>Y</Text>
+              <View
+                style={[styles.legendDot, { backgroundColor: "#f97316" }]}
+              />
+              <Text style={styles.legendText}>Z</Text>
             </View>
-          </CircularDial>
-        </View>
-        <Text style={[styles.cardSubtle, { marginTop: 6 }]}>{Math.max(0, Math.min(100, ampByte ?? 0))}%</Text>
-      </View>
-
-      {/* Frequency control */}
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>Frequency</Text>
-          {writingFreq ? <ActivityIndicator size="small" /> : null}
-        </View>
-        <View style={styles.freqRow}>
-          <TouchableOpacity
-            style={styles.freqButton}
-            onPress={() => {
-              const next = Math.max(1, (freqHz ?? 5) - 1);
-              setFreqHz(next);
-              writeFrequency(next);
-            }}
-            disabled={writingFreq || linkDown || reconnecting}
-          >
-            <Text style={styles.freqButtonText}>-</Text>
-          </TouchableOpacity>
-          <Text style={styles.freqValue}>{freqHz ?? 5} Hz</Text>
-          <TouchableOpacity
-            style={styles.freqButton}
-            onPress={() => {
-              const next = Math.min(1000, (freqHz ?? 5) + 1);
-              setFreqHz(next);
-              writeFrequency(next);
-            }}
-            disabled={writingFreq || linkDown || reconnecting}
-          >
-            <Text style={styles.freqButtonText}>+</Text>
-          </TouchableOpacity>
-        </View>
-        <Text style={styles.cardSubtle}>Default 5 Hz</Text>
-      </View>
-
-      {/* IMU streaming */}
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.cardTitle}>IMU Streaming</Text>
-          <Switch
-            value={imuEnabled}
-            onValueChange={(v) => {
-              setImuEnabled(v);
-              if (!v) setImuSamples([]);
-            }}
-            disabled={linkDown || reconnecting}
-          />
-        </View>
-        <Text style={styles.cardSubtle}>{imuEnabled ? "On" : "Off"}</Text>
-      </View>
-
-      {imuEnabled ? (
-        <View style={[styles.card, styles.imuCard]}>
-          <Text style={styles.cardTitle}>IMU Live Plot</Text>
-          <Text style={styles.chartLabel}>Accel (mg)</Text>
-          <SimpleLineChart series={accelSeries} colors={["#0ea5e9", "#22c55e", "#f97316"]} height={140} />
-          <Text style={styles.chartLabel}>Gyro (deg/s)</Text>
-          <SimpleLineChart series={gyroSeries} colors={["#0ea5e9", "#22c55e", "#f97316"]} height={140} />
-          <View style={styles.legendRow}>
-            <View style={[styles.legendDot, { backgroundColor: "#0ea5e9" }]} />
-            <Text style={styles.legendText}>X</Text>
-            <View style={[styles.legendDot, { backgroundColor: "#22c55e" }]} />
-            <Text style={styles.legendText}>Y</Text>
-            <View style={[styles.legendDot, { backgroundColor: "#f97316" }]} />
-            <Text style={styles.legendText}>Z</Text>
           </View>
-        </View>
-      ) : null}
+        ) : null}
       </ScrollView>
+
+      {/* Precise mA input modal */}
+      <Modal
+        transparent
+        visible={maModalVisible}
+        animationType="fade"
+        onRequestClose={closeMaModal}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeMaModal} />
+
+          <View style={styles.modalCard} onStartShouldSetResponder={() => true}>
+            <Text style={styles.modalTitle}>Set Current (mA)</Text>
+            <Text style={styles.modalSubtle}>
+              Range: 0.00–{STIM_FULL_SCALE_MA.toFixed(2)} mA. Note: device
+              writes in 1% steps (≈
+              {(STIM_FULL_SCALE_MA / 100).toFixed(2)} mA step), so the value
+              will be rounded.
+            </Text>
+
+            <TextInput
+              value={maInput}
+              onChangeText={(t) => {
+                const cleaned = t.replace(/[^\d.,]/g, "");
+                setMaInput(cleaned);
+                if (maInputErr) setMaInputErr(null);
+              }}
+              placeholder="e.g., 3.25"
+              keyboardType={Platform.OS === "ios" ? "decimal-pad" : "numeric"}
+              autoFocus
+              style={styles.modalInput}
+              returnKeyType="done"
+              onSubmitEditing={commitMa}
+              editable={!controlsDisabled}
+            />
+
+            {maPreview ? (
+              <Text style={styles.modalPreview}>
+                Will write: {maPreview.pct}% (code {maPreview.code}) • effective ≈{" "}
+                {maPreview.actualMa.toFixed(2)} mA
+              </Text>
+            ) : null}
+
+            {maInputErr ? (
+              <Text style={styles.modalError}>{maInputErr}</Text>
+            ) : null}
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnOutline]}
+                onPress={closeMaModal}
+              >
+                <Text style={styles.modalBtnText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.modalBtn,
+                  styles.modalBtnPrimary,
+                  controlsDisabled && { opacity: 0.6 },
+                ]}
+                onPress={commitMa}
+                disabled={controlsDisabled}
+              >
+                <Text style={[styles.modalBtnText, styles.modalBtnPrimaryText]}>
+                  Set
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -608,28 +1005,28 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     padding: 16,
-    backgroundColor: '#f6f7f8',
+    backgroundColor: "#f6f7f8",
   },
   safe: {
     flex: 1,
-    backgroundColor: '#f6f7f8',
+    backgroundColor: "#f6f7f8",
   },
   screenContent: {
     paddingBottom: 24,
   },
   headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     marginBottom: 8,
   },
   title: {
     fontSize: 28,
-    fontWeight: '700',
-    color: '#111827',
+    fontWeight: "700",
+    color: "#111827",
   },
   subtitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     marginTop: 2,
   },
   dot: {
@@ -639,38 +1036,38 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   subtitle: {
-    color: '#6b7280',
+    color: "#6b7280",
   },
   syncButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
   syncText: {
-    color: '#2563eb',
-    fontWeight: '600',
+    color: "#2563eb",
+    fontWeight: "600",
     fontSize: 16,
   },
   sectionHeader: {
     marginTop: 12,
     marginBottom: 8,
-    color: '#6b7280',
+    color: "#6b7280",
     fontSize: 13,
-    fontWeight: '600',
-    textTransform: 'uppercase',
+    fontWeight: "600",
+    textTransform: "uppercase",
     letterSpacing: 0.5,
   },
   card: {
-    backgroundColor: '#ffffff',
+    backgroundColor: "#ffffff",
     borderRadius: 12,
     padding: 14,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#e5e7eb',
+    borderColor: "#e5e7eb",
     marginBottom: 12,
     ...Platform.select({
       ios: {
-        shadowColor: '#000',
+        shadowColor: "#000",
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.05,
         shadowRadius: 8,
@@ -682,39 +1079,44 @@ const styles = StyleSheet.create({
     }),
   },
   rowBetween: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   rowCenter: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
   },
   centered: {
-    alignItems: 'center',
+    alignItems: "center",
   },
   cardTitle: {
-    fontWeight: '600',
+    fontWeight: "600",
     fontSize: 16,
-    color: '#111827',
+    color: "#111827",
   },
   cardSubtle: {
-    color: '#6b7280',
+    color: "#6b7280",
     marginTop: 6,
   },
   bigNumber: {
     fontSize: 28,
-    fontWeight: '700',
-    color: '#111827',
+    fontWeight: "700",
+    color: "#111827",
   },
   unit: {
     fontSize: 16,
-    color: '#6b7280',
+    color: "#6b7280",
+  },
+  tapHint: {
+    color: "#6b7280",
+    marginTop: 6,
+    fontSize: 12,
   },
   freqRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginTop: 10,
   },
   freqButton: {
@@ -722,85 +1124,85 @@ const styles = StyleSheet.create({
     height: 44,
     borderRadius: 22,
     borderWidth: 1,
-    borderColor: '#e5e7eb',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#f9fafb',
+    borderColor: "#e5e7eb",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f9fafb",
   },
   freqButtonText: {
     fontSize: 22,
-    fontWeight: '700',
-    color: '#111827',
+    fontWeight: "700",
+    color: "#111827",
   },
   freqValue: {
     fontSize: 20,
-    fontWeight: '600',
-    color: '#111827',
+    fontWeight: "600",
+    color: "#111827",
   },
   errorCard: {
-    backgroundColor: '#fee2e2',
+    backgroundColor: "#fee2e2",
     borderRadius: 10,
     padding: 10,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#fecaca',
+    borderColor: "#fecaca",
     marginBottom: 8,
   },
   errorText: {
-    color: '#b91c1c',
+    color: "#b91c1c",
   },
   disconnectCard: {
-    backgroundColor: '#fff7ed',
+    backgroundColor: "#fff7ed",
     borderRadius: 12,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#fed7aa',
+    borderColor: "#fed7aa",
     marginBottom: 10,
   },
   disconnectTitle: {
-    color: '#9a3412',
-    fontWeight: '700',
+    color: "#9a3412",
+    fontWeight: "700",
   },
   disconnectSubtle: {
-    color: '#9a3412',
+    color: "#9a3412",
     marginTop: 6,
   },
   reconnectButton: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: '#9a3412',
+    backgroundColor: "#9a3412",
   },
   reconnectText: {
-    color: '#fff7ed',
-    fontWeight: '600',
+    color: "#fff7ed",
+    fontWeight: "600",
   },
   imuCard: {
     paddingBottom: 18,
   },
   chartWrap: {
-    width: '100%',
+    width: "100%",
     height: 140,
     marginTop: 8,
-    backgroundColor: '#f9fafb',
+    backgroundColor: "#f9fafb",
     borderRadius: 10,
     paddingHorizontal: 8,
     paddingVertical: 6,
   },
   chartEmpty: {
-    color: '#9ca3af',
+    color: "#9ca3af",
     fontSize: 12,
-    textAlign: 'center',
+    textAlign: "center",
     marginTop: 40,
   },
   chartLabel: {
     marginTop: 10,
-    color: '#6b7280',
+    color: "#6b7280",
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   legendRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     marginTop: 10,
   },
   legendDot: {
@@ -811,7 +1213,77 @@ const styles = StyleSheet.create({
   },
   legendText: {
     marginRight: 12,
-    color: '#6b7280',
+    color: "#6b7280",
     fontSize: 12,
+  },
+
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    padding: 16,
+    backgroundColor: "rgba(0,0,0,0.35)",
+  },
+  modalCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#e5e7eb",
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  modalSubtle: {
+    color: "#6b7280",
+    marginTop: 6,
+  },
+  modalInput: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === "ios" ? 10 : 8,
+    fontSize: 18,
+    color: "#111827",
+    backgroundColor: "#f9fafb",
+  },
+  modalPreview: {
+    marginTop: 10,
+    color: "#374151",
+    fontWeight: "600",
+  },
+  modalError: {
+    color: "#b91c1c",
+    marginTop: 8,
+  },
+  modalBtnRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    marginTop: 14,
+  },
+  modalBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    marginLeft: 10,
+  },
+  modalBtnOutline: {
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    backgroundColor: "#ffffff",
+  },
+  modalBtnPrimary: {
+    backgroundColor: "#2563eb",
+  },
+  modalBtnText: {
+    fontWeight: "700",
+    color: "#111827",
+  },
+  modalBtnPrimaryText: {
+    color: "#ffffff",
   },
 });

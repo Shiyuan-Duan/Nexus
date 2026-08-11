@@ -7,7 +7,14 @@ type Listener<T> = (payload: T) => void;
 class Emitter<T> {
   private listeners: Set<Listener<T>> = new Set();
   emit(v: T) {
-    for (const l of this.listeners) l(v);
+    for (const l of this.listeners) {
+      try {
+        l(v);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[dataBus] listener error", e);
+      }
+    }
   }
   on(l: Listener<T>) {
     this.listeners.add(l);
@@ -24,4 +31,3 @@ export function publishSample(s: Sample) {
 export function onSample(l: Listener<Sample>) {
   return sampleEmitter.on(l);
 }
-

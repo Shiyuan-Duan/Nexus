@@ -45,6 +45,12 @@ export interface BleManagerLike {
     characteristicUUID: string,
     base64: string
   ): Promise<{ value: string | null }>;
+  writeCharacteristicWithoutResponseForDevice?: (
+    id: string,
+    serviceUUID: string,
+    characteristicUUID: string,
+    base64: string
+  ) => Promise<{ value: string | null }>;
   monitorCharacteristicForDevice(
     id: string,
     serviceUUID: string,
@@ -137,7 +143,15 @@ export async function write(
   manager: BleManagerLike
 ): Promise<void> {
   const base64 = bytesToBase64(_data);
-  await manager.writeCharacteristicWithResponseForDevice(id, service, char, base64);
+  try {
+    await manager.writeCharacteristicWithResponseForDevice(id, service, char, base64);
+  } catch (e) {
+    if (typeof manager.writeCharacteristicWithoutResponseForDevice === "function") {
+      await manager.writeCharacteristicWithoutResponseForDevice(id, service, char, base64);
+      return;
+    }
+    throw e;
+  }
 }
 
 export function monitor(
@@ -145,10 +159,17 @@ export function monitor(
   service: string,
   char: string,
   _onData: (data: Uint8Array) => void,
-  manager: BleManagerLike
+  manager: BleManagerLike,
+  onError?: (error: unknown) => void
 ): { unsubscribe: () => void } {
   const sub = manager.monitorCharacteristicForDevice(id, service, char, (_e, _c) => {
     try {
+      if (_e) {
+        // eslint-disable-next-line no-console
+        console.warn("[BLE][monitor] error", { id, service, char, error: _e });
+        onError?.(_e);
+        return;
+      }
       const v = _c?.value ?? '';
       if (v) _onData(base64ToBytes(v));
     } catch {}

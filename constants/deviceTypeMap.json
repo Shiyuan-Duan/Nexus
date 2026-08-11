@@ -5,5 +5,9 @@
   "0000ffe0-0000-1000-8000-00805f9b34fb": "sensor-simple",
   "a0a4c680-96be-4222-b41e-98ea76b0120c": "tns",
   "a0a4e690-96be-4222-b41e-98ea76b0120c": "mlx97",
-  "a0a4c690-96be-4222-b41e-98ea76b0120c": "cs_fg"
+  "a0a4f690-96be-4222-b41e-98ea76b0120c": "dual_ppg",
+  "a0a4c690-96be-4222-b41e-98ea76b0120c": "cs_fg",
+  "a0a4d780-96be-4222-b41e-98ea76b0120c": "max30003",
+  "a0a4b690-96be-4222-b41e-98ea76b0120c": "ads1299",
+  "4f6a9b50-6d4a-4f26-8f6a-3a0b2c1b21a0": "ads1299"
 }

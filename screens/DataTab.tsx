@@ -5,11 +5,11 @@ import { Ionicons } from "@expo/vector-icons";
 import { Swipeable } from "react-native-gesture-handler";
 import {
   getActiveRecordingId,
-  getRecordingCsv,
   getRecordingMeta,
   listRecordings,
   renameRecording,
   deleteRecording,
+  forEachRecordingCsvChunk,
   subscribe as subscribeRecorder,
   type RecordingMeta,
 } from "../services/data/recorder";
@@ -30,8 +30,15 @@ export const DataTab: React.FC = () => {
 
   useEffect(() => {
     void load();
-    const unsub = subscribeRecorder(() => { void load(); });
-    return () => unsub();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = subscribeRecorder(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void load(); }, 250);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsub();
+    };
   }, [load]);
 
   const exportRecording = useCallback(async (rec: RecordingMeta) => {
@@ -43,17 +50,15 @@ export const DataTab: React.FC = () => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const FileSystem = require("expo-file-system");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const Sharing = require("expo-sharing");
+      const FileSystemNext = require("expo-file-system/next");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const JSZip = require("jszip");
+      const Sharing = require("expo-sharing");
 
       if (!(await Sharing.isAvailableAsync())) {
         throw new Error("Sharing is not available on this device.");
       }
       const meta = await getRecordingMeta(rec.id);
-      const csv = await getRecordingCsv(rec.id);
       if (!meta) return;
-      const metaText = JSON.stringify(meta, null, 2);
       const dir = `${FileSystem.documentDirectory}exports`;
       const dirInfo = await FileSystem.getInfoAsync(dir);
       if (!dirInfo.exists) {
@@ -61,17 +66,34 @@ export const DataTab: React.FC = () => {
       }
       const safeId = rec.id.replace(/[^a-zA-Z0-9_-]/g, "_");
       const baseName = `${rec.deviceType}_${safeId}`;
-      const zipPath = `${dir}/${baseName}.zip`;
-      const zip = new JSZip();
-      zip.file(`${baseName}.csv`, csv || "");
-      zip.file(`${baseName}.json`, metaText);
-      const zipBase64 = await zip.generateAsync({ type: "base64" });
-      await FileSystem.writeAsStringAsync(zipPath, zipBase64, {
-        encoding: FileSystem.EncodingType.Base64,
+      const csvPath = `${dir}/${baseName}.csv`;
+      const jsonPath = `${dir}/${baseName}.json`;
+
+      const csvFile = new FileSystemNext.File(csvPath);
+      try {
+        if (csvFile.exists) csvFile.delete();
+      } catch {}
+      csvFile.create({ intermediates: true, overwrite: true });
+      const handle = csvFile.open();
+      const enc = new TextEncoder();
+      try {
+        let first = true;
+        await forEachRecordingCsvChunk(rec.id, async (chunk) => {
+          const text = first ? chunk : `\n${chunk}`;
+          first = false;
+          handle.writeBytes(enc.encode(text));
+        });
+      } finally {
+        handle.close();
+      }
+
+      await FileSystem.writeAsStringAsync(jsonPath, JSON.stringify(meta, null, 2), {
+        encoding: FileSystem.EncodingType.UTF8,
       });
-      await Sharing.shareAsync(zipPath, {
-        mimeType: "application/zip",
-        dialogTitle: `Export ${rec.deviceType} dataset`,
+
+      await Sharing.shareAsync(csvPath, {
+        mimeType: "text/csv",
+        dialogTitle: `Export ${rec.deviceType} CSV`,
       });
     } catch (e: any) {
       setExportErr(e?.message ?? String(e));

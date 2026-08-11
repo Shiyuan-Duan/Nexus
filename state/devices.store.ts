@@ -19,6 +19,7 @@ let restarting = false;
 let lastStartTime = 0;
 let lastStopTime = 0;
 let scanEpoch = 0;
+let scanSuppressed = false;
 
 export function upsertDiscovered(item: { id: string; name?: string; adv: Advertisement; rssi?: number }): void {
   const idx = discovered.findIndex(d => d.id === item.id);
@@ -111,6 +112,9 @@ function emit() {
 }
 
 export function startScan(manager?: BleManagerLike) {
+  if (scanSuppressed) {
+    return;
+  }
   if (scanStopper) return; // already scanning
   lastScanError = null;
   const epoch = ++scanEpoch;
@@ -142,6 +146,13 @@ export function stopScan() {
     scanStopper = null;
     lastStopTime = Date.now();
     emit();
+  }
+}
+
+export function setScanSuppressed(suppressed: boolean): void {
+  scanSuppressed = suppressed;
+  if (suppressed) {
+    stopScan();
   }
 }
 
